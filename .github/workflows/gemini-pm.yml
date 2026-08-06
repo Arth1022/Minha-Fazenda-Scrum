@@ -1,0 +1,74 @@
+name: PM Gemini - Refinamento de Issues
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  refinar-issue:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Processar com Gemini em Python
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          python -c '
+          import os
+          import json
+          import urllib.request
+
+          api_key = os.environ.get("GEMINI_API_KEY")
+          title = os.environ.get("ISSUE_TITLE", "")
+          body = os.environ.get("ISSUE_BODY", "")
+
+          prompt = f"""Você é um Product Manager especialista em aplicativos para agronegócio.
+  Transforme a ideia abaixo em uma História de Usuário e defina os Critérios de Aceite.
+
+Siga exatamente este formato em Markdown:
+
+  ### 👤 História de Usuário
+  - **Como um** [perfil de usuário do campo, ex: produtor rural, pecuarista, operador]
+  - **Eu quero** [ação que ele deseja realizar]
+  - **Para que** [benefício prático/problema resolvido]
+
+  ### ✅ Critérios de Aceite
+  - [ ] Critério 1 (se aplicável, inclua algo sobre modo offline, usabilidade simples ou validação)
+  - [ ] Critério 2
+  - [ ] Critério 3
+
+---
+*Retorne APENAS o conteúdo em Markdown formatado, sem introduções, saudações ou explicações adicionais.*
+  
+  **Título original:** {title}
+  **Ideia original:** {body}
+  """
+
+          url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+headers = {"Content-Type": "application/json"}
+  payload = {
+"contents": [{
+  "parts": [{"text": prompt}]
+}]
+}
+
+try:
+  req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
+  with urllib.request.urlopen(req) as response:
+    res_data = json.loads(response.read().decode("utf-8"))
+    text = res_data["candidates"][0]["content"]["parts"][0]["text"]
+
+    with open("nova_descricao.md", "w", encoding="utf-8") as f:
+      f.write(text)
+except Exception as e:
+  print(f"Erro ao chamar API do Gemini: {e}")
+  exit(1)
+  '
+
+- name: Atualizar a Issue no GitHub
+  env:
+    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    ISSUE_NUMBER: ${{ github.event.issue.number }}
+  run: |
+    gh issue edit $ISSUE_NUMBER --body-file nova_descricao.md
