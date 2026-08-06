@@ -3,72 +3,57 @@ name: PM Gemini - Refinamento de Issues
 on:
   issues:
     types: [opened]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Numero da issue a refinar (teste manual)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: pm-gemini-${{ github.event.issue.number || inputs.issue_number }}
+  cancel-in-progress: false
 
 jobs:
   refinar-issue:
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue_number }}
+
     steps:
-      - name: Processar com Gemini em Python
+      - name: Baixar o repositorio
+        uses: actions/checkout@v4
+
+      - name: Coletar issue, backlog e labels do repositorio
+        run: |
+          gh issue view "$ISSUE_NUMBER" --json number,title,body > issue.json
+          gh issue list --state all --limit 200 --json number,title,state > backlog.json
+          gh label list --limit 100 --json name,description > labels.json
+
+      - name: Refinar com Gemini
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          ISSUE_TITLE: ${{ github.event.issue.title }}
-          ISSUE_BODY: ${{ github.event.issue.body }}
+          GEMINI_MODEL: gemini-2.5-flash
+        run: python3 .github/scripts/refinar_issue.py
+
+      - name: Atualizar a issue
         run: |
-          python -c '
-          import os
-          import json
-          import urllib.request
+          gh issue edit "$ISSUE_NUMBER" \
+            --title "$(cat novo_titulo.txt)" \
+            --body-file nova_descricao.md
 
-          api_key = os.environ.get("GEMINI_API_KEY")
-          title = os.environ.get("ISSUE_TITLE", "")
-          body = os.environ.get("ISSUE_BODY", "")
+          if [ -s labels.txt ]; then
+            gh issue edit "$ISSUE_NUMBER" --add-label "$(cat labels.txt)"
+          fi
 
-          prompt = f"""Você é um Product Manager especialista em aplicativos para agronegócio.
-          Transforme a ideia abaixo em uma História de Usuário e defina os Critérios de Aceite.
-
-          Siga exatamente este formato em Markdown:
-
-          ### História de Usuário
-          - **Como um** [perfil de usuário do campo, ex: produtor rural, pecuarista, operador]
-          - **Eu quero** [ação que ele deseja realizar]
-          - **Para que** [benefício prático/problema resolvido]
-
-          ### Critérios de Aceite
-          - [ ] Critério 1 (se aplicável, inclua algo sobre modo offline, usabilidade simples ou validação)
-          - [ ] Critério 2
-          - [ ] Critério 3
-
-          ---
-          *Retorne APENAS o conteúdo em Markdown formatado, sem introduções, saudações ou explicações adicionais.*
-
-          **Título original:** {title}
-          **Ideia original:** {body}
-          """
-
-          url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
-          headers = {"Content-Type": "application/json"}
-          payload = {
-              "contents": [{
-                  "parts": [{"text": prompt}]
-              }]
-          }
-
-          try:
-              req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
-              with urllib.request.urlopen(req) as response:
-                  res_data = json.loads(response.read().decode("utf-8"))
-                  text = res_data["candidates"][0]["content"]["parts"][0]["text"]
-                  
-                  with open("nova_descricao.md", "w", encoding="utf-8") as f:
-                      f.write(text)
-          except Exception as e:
-              print(f"Erro ao chamar API do Gemini: {e}")
-              exit(1)
-          '
-
-      - name: Atualizar a Issue no GitHub
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
+      - name: Avisar na issue se o refinamento falhou
+        if: failure()
         run: |
-          gh issue edit $ISSUE_NUMBER --body-file nova_descricao.md
+          gh issue comment "$ISSUE_NUMBER" --body \
+            "O refinamento automatico falhou. Log da execucao: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
