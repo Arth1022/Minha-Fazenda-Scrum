@@ -1,7 +1,7 @@
 # Arquitetura do Projeto: App de Gestão para Fazendas
 > ** IMPORTANTE: LEIA ANTES DE COMEÇAR A TRABALHAR**
 > Antes de escrever qualquer código ou assumir uma tarefa, é obrigatório ler o nosso
-**[Guia de Contribuição e Fluxo de Trabalho](./guia_contribuicao_atualizado.md)**
+**[Guia de Contribuição e Fluxo de Trabalho](./Git_Workflow.md)**
 localizado na raiz do repositório. Ele define como criamos branches, abrimos Pull
 Requests e trabalhamos em equipe.
 
