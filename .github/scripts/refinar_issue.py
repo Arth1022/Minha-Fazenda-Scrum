@@ -1,8 +1,18 @@
-"""Refina uma issue crua em Historia de Usuario usando a API do Gemini.
+"""Organiza uma issue crua em Historia de Usuario usando a API do Gemini.
+
+O script e propositalmente simples: ele NAO reescreve a ideia do autor. Ele so faz tres coisas:
+  1. Numera a historia (HUnnn), sem reaproveitar numero de historia ja apagada -
+     usa sempre o maior numero ja existente no backlog + 1.
+  2. Corrige erros de portugues no titulo e em cada tarefa.
+  3. Classifica a historia nas labels do repositorio.
+
+A descricao original e dividida em tarefas por virgula (ou por linha, se nao houver virgula) -
+cada pedaco vira um item da lista. O modelo so pode corrigir ortografia/gramatica de cada
+item; ele nao pode juntar, quebrar, remover ou inventar tarefas.
 
 Le issue.json, backlog.json e labels.json (gerados pelo gh CLI no workflow) e escreve:
-  nova_descricao.md : corpo novo da issue
-  novo_titulo.txt   : titulo com o identificador da historia (HU-NN)
+  nova_descricao.md : corpo novo da issue (lista de tarefas)
+  novo_titulo.txt   : titulo com o identificador da historia (HUnnn)
   labels.txt        : labels escolhidas pelo modelo, separadas por virgula
 
 As labels vem do proprio repositorio em tempo de execucao. GRUPOS abaixo so diz
@@ -75,22 +85,25 @@ def resolver_grupos(labels_do_repo):
     return resolvidos
 
 
-def montar_esquema(grupos):
+def montar_esquema(grupos, n_tarefas):
     propriedades = {
         "titulo": {
             "type": "string",
-            "description": "Titulo curto e especifico, sem o identificador HU",
+            "description": (
+                "O mesmo titulo original, apenas com erros de portugues corrigidos. "
+                "Nao invente um titulo novo. Sem o identificador HU."
+            ),
         },
-        "corpo_markdown": {
-            "type": "string",
-            "description": "A historia completa em Markdown, no formato pedido",
-        },
-        "issues_relacionadas": {
+        "tarefas": {
             "type": "array",
-            "items": {"type": "integer"},
-            "description": "Numeros de issues do backlog que se sobrepoem a esta",
+            "items": {"type": "string"},
+            "minItems": n_tarefas,
+            "maxItems": n_tarefas,
+            "description": (
+                "Exatamente as mesmas tarefas de entrada, na mesma ordem, apenas com "
+                "erros de portugues corrigidos. Nao junte, nao separe, nao invente."
+            ),
         },
-        "tem_perguntas_abertas": {"type": "boolean"},
     }
     for campo, grupo in grupos.items():
         if grupo["multiplo"]:
@@ -117,33 +130,51 @@ def carregar():
 
 
 def definir_id(issue, backlog):
-    """Numeracao deterministica: reaproveita o ID se ja existir, senao usa max+1."""
+    """Numeracao deterministica: reaproveita o ID se ja existir, senao preenche o buraco.
+
+    `backlog` vem de `gh issue list --state all`, que so lista issues que ainda
+    existem (abertas ou fechadas) - uma issue apagada de verdade some dessa lista.
+    Por isso o proximo numero e sempre o MENOR numero que nao esta mais em uso:
+    se HU001 existe e HU002 foi apagada, a proxima historia volta a ser HU002
+    (nao pula pra HU003).
+    """
     ja_tem = ID_RE.search(issue["title"] or "")
     if ja_tem:
-        return f"HU-{int(ja_tem.group(1)):02d}"
+        return f"HU{int(ja_tem.group(1)):03d}"
 
-    usados = []
+    usados = set()
     for outra in backlog:
         achou = ID_RE.search(outra["title"] or "")
         if achou:
-            usados.append(int(achou.group(1)))
-    return f"HU-{(max(usados) + 1 if usados else 1):02d}"
+            usados.add(int(achou.group(1)))
+
+    proximo = 1
+    while proximo in usados:
+        proximo += 1
+    return f"HU{proximo:03d}"
 
 
-def montar_prompt(issue, backlog, grupos, story_id):
-    outras = [i for i in backlog if i["number"] != issue["number"]]
-    if outras:
-        lista = "\n".join(
-            f"- #{i['number']} [{i['state'].lower()}] {i['title']}" for i in outras
-        )
-    else:
-        lista = "(backlog vazio - esta e a primeira historia do projeto)"
+def dividir_tarefas(descricao, titulo_reserva):
+    """Quebra a descricao crua em tarefas, sem reescrever nada.
 
+    Separador e virgula OU quebra de linha (o autor pode usar qualquer um dos dois,
+    ou os dois). Se a descricao vier vazia, usa o titulo como unica tarefa - assim a
+    historia sempre tem pelo menos uma linha no corpo.
+    """
+    texto = (descricao or "").strip()
+    if not texto:
+        return [titulo_reserva.strip()] if titulo_reserva.strip() else []
+
+    pedacos = re.split(r"[,\n]+", texto)
+    tarefas = [p.strip(" \t-*•") for p in pedacos]
+    tarefas = [t for t in tarefas if t]
+    return tarefas or [texto]
+
+
+def montar_prompt(issue, grupos, story_id, tarefas):
     blocos = []
     for campo, grupo in grupos.items():
-        quantidade = (
-            "uma ou mais" if grupo["multiplo"] else "exatamente uma"
-        )
+        quantidade = "uma ou mais" if grupo["multiplo"] else "exatamente uma"
         opcoes = ", ".join(f"`{l}`" for l in grupo["labels"])
         blocos.append(
             f"### `{campo}` - {grupo['titulo']}\n"
@@ -151,82 +182,34 @@ def montar_prompt(issue, backlog, grupos, story_id):
         )
     classificacao = "\n\n".join(blocos)
 
-    corpo = (issue["body"] or "").strip() or "(o autor nao escreveu descricao)"
+    tarefas_texto = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(tarefas))
 
     return f"""Você é o Product Owner do "Minha Fazenda", um aplicativo de gestão para \
 produtores rurais brasileiros, conduzido em Scrum.
 
-## Contexto do produto
-- Usuários: produtor rural, pecuarista, agrônomo e operador de campo — em geral com \
-pouca familiaridade com tecnologia.
-- Uso real: celular na mão no meio da lavoura ou do curral, sol forte, mãos sujas, \
-às vezes com luva, conexão de dados instável ou inexistente.
-- Consequência: tudo precisa ser offline-first, com telas simples, poucos toques, \
-textos grandes e linguagem do campo (não use jargão técnico dentro da história).
-
-## Backlog atual (para você NÃO repetir história já existente)
-{lista}
-
 ## Identificador desta história
 Use exatamente `{story_id}`. Ele já foi calculado — não invente outro número.
 
-## Sua tarefa
-Transforme a ideia crua abaixo em uma História de Usuário pronta para a Sprint Planning, \
-e classifique-a você mesmo nos campos abaixo.
+## Sua tarefa (seja literal, não reescreva a ideia)
+O autor já dividiu a ideia em tarefas abaixo. Sua única tarefa em relação a elas é \
+corrigir ortografia e gramática, mantendo o sentido original de cada uma. \
+Não junte duas tarefas em uma, não separe uma tarefa em duas, não invente tarefas \
+novas, não remova nenhuma e não mude a ordem. A lista de saída precisa ter \
+exatamente {len(tarefas)} item(ns), na mesma ordem.
+
+O mesmo vale para o título: só corrija erros de português, sem reescrevê-lo.
 
 **Título original:** {issue["title"]}
-**Ideia original:** {corpo}
+
+**Tarefas originais (já divididas pelo autor):**
+{tarefas_texto}
 
 ## Classificação
-Você decide. Julgue pelo esforço real de implementação, não pelo tamanho do texto \
-da ideia.
+Depois de corrigir o texto, classifique a história nos campos abaixo. Julgue pelo \
+esforço real de implementação, considerando que os usuários são produtores rurais \
+com pouca familiaridade com tecnologia e que o app precisa funcionar offline.
 
 {classificacao}
-
-### `issues_relacionadas`
-Números das issues do backlog acima que se sobrepõem a esta (lista vazia se nenhuma).
-
-### `tem_perguntas_abertas`
-`true` se restou ambiguidade que o PO precisa responder.
-
-## Regras para o `corpo_markdown`
-- Critérios de aceite em Gherkin (**Dado** / **Quando** / **Então**), testáveis e \
-observáveis. No máximo 6.
-- Pelo menos um critério deve cobrir comportamento sem internet, quando fizer sentido.
-- Se algo estiver ambíguo, **não invente requisito** — registre em "Perguntas para o PO".
-- Se houver sobreposição com o backlog, cite `#numero` dentro do corpo também.
-- Não cite tecnologias, bancos de dados ou integrações que não foram mencionados.
-- A seção "Esforço" deve explicar a escolha do tamanho, coerente com o campo `tamanho`.
-- Escreva o corpo neste formato exato:
-
-### {story_id} — <título curto e específico>
-
-**Como um** <perfil de usuário do campo>
-**Eu quero** <ação concreta>
-**Para que** <benefício prático / problema resolvido>
-
-### Critérios de Aceite
-- [ ] **Dado** <contexto> **Quando** <ação> **Então** <resultado observável>
-
-### Regras de Negócio
-- <regra objetiva, ou "Nenhuma identificada">
-
-### Notas de Campo (offline e usabilidade)
-- <o que precisa funcionar sem sinal, o que precisa ser à prova de erro>
-
-### Notas Técnicas
-- <o que cada parte da stack escolhida precisa fazer>
-
-### Definição de Pronto
-- [ ] Funciona sem conexão e sincroniza quando a internet voltar
-- [ ] Testado em tela pequena e sob luz forte
-- [ ] <outro item específico desta história>
-
-### Esforço
-**<tamanho escolhido>** — <justificativa em uma linha>
-
-### Perguntas para o PO
-- <pergunta, ou "Nenhuma — escopo claro">
 """
 
 
@@ -253,7 +236,7 @@ def chamar_gemini(prompt, esquema):
     api_key = os.environ["GEMINI_API_KEY"]
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
     config = {
-        "temperature": 0.4,
+        "temperature": 0.1,
         "maxOutputTokens": 8192,
         "responseMimeType": "application/json",
         "responseSchema": esquema,
@@ -317,33 +300,38 @@ def main():
     issue, backlog, labels_do_repo = carregar()
     grupos = resolver_grupos(labels_do_repo)
     story_id = definir_id(issue, backlog)
-    print(f"Refinando issue #{issue['number']} como {story_id} (modelo {MODEL})")
+    tarefas_originais = dividir_tarefas(issue["body"], issue["title"] or "")
+    print(f"Refinando issue #{issue['number']} como {story_id} (modelo {MODEL}, "
+          f"{len(tarefas_originais)} tarefa(s))")
 
     resultado = chamar_gemini(
-        montar_prompt(issue, backlog, grupos, story_id), montar_esquema(grupos)
+        montar_prompt(issue, grupos, story_id, tarefas_originais),
+        montar_esquema(grupos, len(tarefas_originais)),
     )
-    original = (issue["body"] or "").strip() or "_(sem descricao original)_"
 
-    relacionadas = resultado.get("issues_relacionadas") or []
-    aviso = ""
-    if relacionadas:
-        refs = ", ".join(f"#{n}" for n in relacionadas)
-        aviso = f"> ⚠️ Pode se sobrepor a: {refs}\n\n"
-    if resultado.get("tem_perguntas_abertas"):
-        aviso += "> ⚠️ Tem pergunta em aberto para o PO — veja o fim da issue.\n\n"
+    tarefas_final = resultado.get("tarefas") or []
+    valido = (
+        len(tarefas_final) == len(tarefas_originais)
+        and all(isinstance(t, str) and t.strip() for t in tarefas_final)
+    )
+    if not valido:
+        print(
+            "aviso: o modelo devolveu uma lista de tarefas inconsistente; "
+            "mantendo o texto original sem correcao",
+            file=sys.stderr,
+        )
+        tarefas_final = tarefas_originais
+
+    corpo_lista = "\n".join(f"- {t.strip()}" for t in tarefas_final)
 
     with open("nova_descricao.md", "w", encoding="utf-8") as f:
-        f.write(
-            f"{aviso}{resultado['corpo_markdown'].strip()}\n\n---\n\n"
-            "<details>\n<summary>Ideia original (antes do refinamento)</summary>\n\n"
-            f"{original}\n\n</details>\n\n"
-            f"<sub>Refinado automaticamente por {MODEL} — revise antes da Sprint "
-            "Planning.</sub>\n"
-        )
+        f.write(f"{corpo_lista}\n")
 
-    titulo = ID_RE.sub("", resultado["titulo"] or "").lstrip(" -—:").strip()
+    titulo = ID_RE.sub("", resultado.get("titulo") or "").lstrip(" -—:").strip()
+    if not titulo:
+        titulo = (issue["title"] or "").strip()
     with open("novo_titulo.txt", "w", encoding="utf-8") as f:
-        f.write(f"{story_id} — {titulo}")
+        f.write(f"{story_id} - {titulo}")
 
     labels = montar_labels(resultado, grupos)
     print(f"Labels: {labels}")
