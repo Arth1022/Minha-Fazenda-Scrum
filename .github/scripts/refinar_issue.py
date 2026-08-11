@@ -1,18 +1,20 @@
 """Organiza uma issue crua em Historia de Usuario usando a API do Gemini.
 
 O script e propositalmente simples: ele NAO reescreve a ideia do autor. Ele so faz tres coisas:
-  1. Numera a historia (HUnnn), sem reaproveitar numero de historia ja apagada -
+  1. Numera a historia (HU-nnn), sem reaproveitar numero de historia ja apagada -
      usa sempre o maior numero ja existente no backlog + 1.
   2. Corrige erros de portugues no titulo e em cada tarefa.
   3. Classifica a historia nas labels do repositorio.
 
 A descricao original e dividida em tarefas por virgula (ou por linha, se nao houver virgula) -
-cada pedaco vira um item da lista. O modelo so pode corrigir ortografia/gramatica de cada
-item; ele nao pode juntar, quebrar, remover ou inventar tarefas.
+cada pedaco vira um item da lista sob "O que precisa ser feito:". O modelo so pode corrigir
+ortografia/gramatica de cada item; ele nao pode juntar, quebrar, remover ou inventar tarefas.
+Os criterios de aceitacao NAO sao gerados aqui de proposito - invente-los seria reescrever a
+ideia do autor; o time preenche essa secao no refinamento.
 
 Le issue.json, backlog.json e labels.json (gerados pelo gh CLI no workflow) e escreve:
   nova_descricao.md : corpo novo da issue (lista de tarefas)
-  novo_titulo.txt   : titulo com o identificador da historia (HUnnn)
+  novo_titulo.txt   : titulo com o identificador da historia (HU-nnn)
   labels.txt        : labels escolhidas pelo modelo, separadas por virgula
 
 As labels vem do proprio repositorio em tempo de execucao. GRUPOS abaixo so diz
@@ -34,35 +36,86 @@ ID_RE = re.compile(r"\bHU[-\s]?(\d+)", re.IGNORECASE)
 
 GRUPOS = {
     "tamanho": {
-        "labels": ["PP", "P", "G", "GG"],
+        "labels": ["PP", "P", "M", "G", "GG"],
         "multiplo": False,
         "titulo": "Tamanho (esforco estimado)",
         "guia": (
-            "- `PP`: ajuste trivial, poucas horas. Uma tela ja existente, um campo a mais.\n"
-            "- `P`: cabe folgado numa sprint. Um fluxo simples, sem regra complicada.\n"
-            "- `G`: ocupa boa parte da sprint. Varias telas ou regra de negocio densa.\n"
+            "- `PP`: trivial, poucas horas. Uma tela ja existente, um campo a mais.\n"
+            "- `P`: pequeno, cerca de um dia. Um fluxo simples, sem regra complicada.\n"
+            "- `M`: medio, dois a tres dias. Algumas telas ou uma regra de negocio com jeito.\n"
+            "- `G`: grande, ocupa boa parte de uma sprint de foco.\n"
             "- `GG`: nao cabe numa sprint. Se escolher GG, sugira a quebra dentro do corpo."
         ),
     },
-    "stack": {
-        "labels": ["Front-End", "Back-End", "DataBase"],
-        "multiplo": True,
-        "titulo": "Stack envolvida",
+    "camada": {
+        "labels": ["front", "back", "back-complexo", "back-end", "infra"],
+        "multiplo": False,
+        "titulo": "Camada",
         "guia": (
-            "- `Front-End`: tem tela, formulario, navegacao ou interacao do usuario.\n"
-            "- `Back-End`: tem regra de negocio, API, calculo, notificacao ou sincronizacao.\n"
-            "- `DataBase`: cria/altera dado persistido, novo cadastro ou migracao.\n"
-            "Escolha todas que se aplicam - a maioria das historias tem mais de uma."
+            "O app e local-first (React Native + WatermelonDB/SQLite, tudo offline no aparelho),\n"
+            "entao `back` quase sempre NAO e servidor - e a camada de dados e logica que roda no\n"
+            "proprio celular.\n"
+            "- `front`: telas, componentes, navegacao (React Native).\n"
+            "- `back`: dados locais - schema WatermelonDB, models, CRUD, calculos e regras\n"
+            "  que rodam no aparelho.\n"
+            "- `back-complexo`: tarefa de back pesada o bastante para virar issue propria\n"
+            "  (cache de mapa offline, motor de sync, agendamento de notificacoes).\n"
+            "- `back-end`: servidor de verdade (Spring Boot / Firebase). So aparece nas\n"
+            "  historias de sincronizacao e login.\n"
+            "- `infra`: build, assinatura e publicacao nas lojas.\n"
+            "Escolha a camada onde esta o maior peso do trabalho. Se a historia tem tela E\n"
+            "dados locais, ela deveria ser duas issues - escolha a dominante e sugira a\n"
+            "quebra dentro do corpo."
         ),
     },
-    "tipo": {
-        "labels": ["Melhoria", "Bug", "Documentação"],
+    "modulo": {
+        "labels": [
+            "fundação",
+            "mapa",
+            "estoque",
+            "plantação",
+            "máquinas",
+            "rebanho",
+            "tratamento",
+            "qr-code",
+            "home",
+            "sincronização",
+            "publicação",
+            "refinamento",
+        ],
         "multiplo": False,
-        "titulo": "Tipo de trabalho",
+        "titulo": "Modulo do app",
         "guia": (
-            "- `Melhoria`: funcionalidade nova ou evolucao de algo existente (caso comum).\n"
-            "- `Bug`: algo que ja existe e esta funcionando errado.\n"
-            "- `Documentação`: material de apoio, manual, documentacao do projeto."
+            "- `fundação`: estrutura base do projeto, persistencia local, navegacao base.\n"
+            "- `mapa`: mapa de satelite, perimetro, talhoes e cercas.\n"
+            "- `estoque`: insumos, saldo e baixa automatica.\n"
+            "- `plantação`: plantio por talhao, atividades, lembretes e carencia.\n"
+            "- `máquinas`: tratores, implementos, manutencao e abastecimento.\n"
+            "- `rebanho`: cadastro e listagem dos animais.\n"
+            "- `tratamento`: vacinas, vermifugos e medicacao do rebanho.\n"
+            "- `qr-code`: leitura de QR e QR por animal.\n"
+            "- `home`: tela inicial, atalhos e avisos.\n"
+            "- `sincronização`: login, API de sync, conflitos e multi-dispositivo.\n"
+            "- `publicação`: onboarding, build de release e lojas.\n"
+            "- `refinamento`: testes, correcao de bugs e padronizacao de UX/UI."
+        ),
+    },
+    "tecnicas": {
+        "labels": ["offline", "dados", "cálculo", "notificação", "geo", "sync", "câmera", "auth"],
+        "multiplo": True,
+        "opcional": True,
+        "titulo": "Marcadores tecnicos",
+        "guia": (
+            "- `offline`: o ponto central da historia e funcionar sem internet.\n"
+            "- `dados`: cria ou altera dado persistido (model, schema, migration, CRUD).\n"
+            "- `cálculo`: tem conta a fazer (area, comprimento, quantidade, data).\n"
+            "- `notificação`: agenda ou dispara notificacao local.\n"
+            "- `geo`: mexe com coordenadas, poligonos ou GPS.\n"
+            "- `sync`: faz parte da sincronizacao com a nuvem.\n"
+            "- `câmera`: usa a camera do aparelho.\n"
+            "- `auth`: cadastro, login ou sessao.\n"
+            "Marque so o que realmente se aplica. E normal uma historia nao ter nenhum -\n"
+            "nesse caso devolva uma lista vazia."
         ),
     },
 }
@@ -109,6 +162,7 @@ def montar_esquema(grupos, n_tarefas):
         if grupo["multiplo"]:
             propriedades[campo] = {
                 "type": "array",
+                "minItems": 0 if grupo.get("opcional") else 1,
                 "items": {"type": "string", "enum": grupo["labels"]},
             }
         else:
@@ -140,7 +194,7 @@ def definir_id(issue, backlog):
     """
     ja_tem = ID_RE.search(issue["title"] or "")
     if ja_tem:
-        return f"HU{int(ja_tem.group(1)):03d}"
+        return f"HU-{int(ja_tem.group(1)):03d}"
 
     usados = set()
     for outra in backlog:
@@ -151,7 +205,7 @@ def definir_id(issue, backlog):
     proximo = 1
     while proximo in usados:
         proximo += 1
-    return f"HU{proximo:03d}"
+    return f"HU-{proximo:03d}"
 
 
 def dividir_tarefas(descricao, titulo_reserva):
@@ -174,7 +228,12 @@ def dividir_tarefas(descricao, titulo_reserva):
 def montar_prompt(issue, grupos, story_id, tarefas):
     blocos = []
     for campo, grupo in grupos.items():
-        quantidade = "uma ou mais" if grupo["multiplo"] else "exatamente uma"
+        if not grupo["multiplo"]:
+            quantidade = "exatamente uma"
+        elif grupo.get("opcional"):
+            quantidade = "zero ou mais"
+        else:
+            quantidade = "uma ou mais"
         opcoes = ", ".join(f"`{l}`" for l in grupo["labels"])
         blocos.append(
             f"### `{campo}` - {grupo['titulo']}\n"
@@ -325,13 +384,13 @@ def main():
     corpo_lista = "\n".join(f"- {t.strip()}" for t in tarefas_final)
 
     with open("nova_descricao.md", "w", encoding="utf-8") as f:
-        f.write(f"{corpo_lista}\n")
+        f.write(f"O que precisa ser feito:\n{corpo_lista}\n")
 
     titulo = ID_RE.sub("", resultado.get("titulo") or "").lstrip(" -—:").strip()
     if not titulo:
         titulo = (issue["title"] or "").strip()
     with open("novo_titulo.txt", "w", encoding="utf-8") as f:
-        f.write(f"{story_id} - {titulo}")
+        f.write(f"{story_id} — {titulo}")
 
     labels = montar_labels(resultado, grupos)
     print(f"Labels: {labels}")
